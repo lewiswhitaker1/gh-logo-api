@@ -1,15 +1,18 @@
 const express = require('express');
-const cors = require('cors'); // 1. Import cors
+const cors = require('cors');
 const Fuse = require('fuse.js');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 2. Enable CORS for all routes
-// (You can also restrict this to just your Shopify domain later if you want)
 app.use(cors());
 
-// Extracted logo data from the provided HTML
+// Serve the 'public' folder so your frontend can actually access the downloaded images
+app.use(express.static(path.join(__dirname, 'public')));
+
 const logos = [
     { company: "ADC", url: "https://www.pencarrie.com/storage/phoenix/brands/e6iKTlXTcXCqF3hgLBsA5LvoblUyBvyUIhidkxRK.jpg" },
     { company: "Anthem", url: "https://www.pencarrie.com/storage/phoenix/brands/2uvnvDjUbGneMO0asopLsjSfCuB5uIDi5w3duDkI.jpeg" },
@@ -90,51 +93,102 @@ const logos = [
     { company: "Yoko", url: "https://www.pencarrie.com/storage/phoenix/brands/oE81VRI18x6E7QjiS4P21aR0tAyf76RAjISfw0fA.jpeg" }
 ];
 
-// Configure Fuse.js options
-const fuseOptions = {
-    // isCaseSensitive: false, // Default is false
-    includeScore: true,
-    // Threshold determines how "fuzzy" the search is. 
-    // 0.0 requires a perfect match, 1.0 matches anything. 0.4 is a good sweet spot for typos.
-    threshold: 0.4,
-    keys: ['company'] // Tell Fuse to search within the 'company' property
+const LOGO_DIR = path.join(__dirname, 'public', 'logos');
+
+// Helper function to download an image
+const downloadImage = (url, filepath) => {
+    return new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+            if (res.statusCode === 200) {
+                const writeStream = fs.createWriteStream(filepath);
+                res.pipe(writeStream);
+                writeStream.on('finish', () => {
+                    writeStream.close();
+                    resolve();
+                });
+            } else {
+                reject(new Error(`Failed to download ${url}: Status ${res.statusCode}`));
+            }
+        }).on('error', reject);
+    });
 };
 
-// Initialize Fuse with your data and options
+// Initialize server data and download missing images
+const initializeLogos = async () => {
+    console.log('Checking logo files...');
+
+    // Create the directory if it doesn't exist
+    if (!fs.existsSync(LOGO_DIR)) {
+        fs.mkdirSync(LOGO_DIR, { recursive: true });
+        console.log('Created public/logos directory.');
+    }
+
+    // Loop through logos and download if necessary
+    for (let i = 0; i < logos.length; i++) {
+        const logo = logos[i];
+
+        // Extract extension (e.g., .jpg or .png) and create a clean filename
+        const ext = path.extname(new URL(logo.url).pathname);
+        const safeCompanyName = logo.company.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const filename = `${safeCompanyName}${ext}`;
+        const filepath = path.join(LOGO_DIR, filename);
+
+        // Update the array in memory to point to the local file instead of external URL
+        logo.localUrl = `/logos/${filename}`;
+
+        // If the file doesn't exist locally, download it
+        if (!fs.existsSync(filepath)) {
+            console.log(`Downloading: ${logo.company}...`);
+            try {
+                await downloadImage(logo.url, filepath);
+            } catch (err) {
+                console.error(`Error downloading ${logo.company}:`, err.message);
+                // Fallback to the remote URL if download fails
+                logo.localUrl = logo.url;
+            }
+        }
+    }
+
+    console.log('All logos are ready locally!');
+};
+
+// --- Fuse.js Setup ---
+const fuseOptions = {
+    includeScore: true,
+    threshold: 0.4,
+    keys: ['company']
+};
+
 const fuse = new Fuse(logos, fuseOptions);
 
-// Endpoint to retrieve all logos
+// --- API Endpoints ---
 app.get('/api/logos', (req, res) => {
     res.json({
         success: true,
         count: logos.length,
-        data: logos
+        data: logos // Now includes the localUrl property
     });
 });
 
-// Updated fuzzy-search endpoint
 app.get('/api/logos/:companyName', (req, res) => {
     const query = req.params.companyName;
-
-    // Perform the fuzzy search
     const results = fuse.search(query);
 
-    // Fuse returns an array of matches ordered by best match first
     if (results.length > 0) {
-        // We grab the highest scoring match (index 0) and extract the actual item
-        const bestMatch = results[0].item;
-
         res.json({
             success: true,
-            confidenceScore: results[0].score, // Optional: Shows how close the match was (closer to 0 is better)
-            data: bestMatch
+            confidenceScore: results[0].score,
+            data: results[0].item // Now includes the localUrl property
         });
     } else {
         res.status(404).json({ success: false, message: "Company logo not found" });
     }
 });
 
-// Start the server
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+// --- Start Server ---
+// We wrap the server start in our initialization function
+initializeLogos().then(() => {
+    app.listen(PORT, () => {
+        console.log(`Server is running on http://localhost:${PORT}`);
+    });
 });
