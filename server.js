@@ -445,7 +445,14 @@ app.post(
   }
 );
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+// ── Export for Vercel serverless / local dev ──────────────────────────────────
+// Vercel runs the app as a serverless function — it does NOT call app.listen().
+// We export the app so Vercel can invoke it directly.
+// The listen() call only runs locally (e.g. `node server.js`).
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
