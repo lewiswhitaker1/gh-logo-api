@@ -266,6 +266,31 @@ const fuseOptions = {
 // Initialize Fuse with your data and options
 const fuse = new Fuse(logos, fuseOptions);
 
+// ── Diagnostic endpoint ───────────────────────────────────────────────────────
+// Visit https://your-vercel-app.vercel.app/api/shopify-check to confirm the
+// Admin API connection works. Safe to leave deployed — it never exposes the
+// token and only returns the store name.
+app.get('/api/shopify-check', async (_req, res) => {
+  const rawDomain = process.env.SHOPIFY_STORE_DOMAIN || '';
+  const token     = process.env.SHOPIFY_ADMIN_API_TOKEN || '';
+  const domain    = rawDomain.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+
+  const info = {
+    domain_raw:       rawDomain,
+    domain_cleaned:   domain,
+    domain_ends_with: domain.endsWith('.myshopify.com'),
+    token_present:    Boolean(token),
+    token_prefix:     token ? token.slice(0, 6) + '…' : null,
+  };
+
+  try {
+    const data = await shopifyAdmin(`{ shop { name myshopifyDomain } }`);
+    return res.json({ ok: true, ...info, shop: data.shop });
+  } catch (err) {
+    return res.status(500).json({ ok: false, ...info, error: err.message });
+  }
+});
+
 // Endpoint to retrieve all logos
 app.get('/api/logos', (req, res) => {
     res.json({
