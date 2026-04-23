@@ -2,7 +2,110 @@ const express = require('express');
 const cors    = require('cors');
 const Fuse    = require('fuse.js');
 const multer  = require('multer');
-const { put } = require('@vercel/blob');
+const crypto  = require('crypto');
+
+// ── Shopify Admin API helpers ─────────────────────────────────────────────────
+// Required env vars (set in Vercel dashboard):
+//   SHOPIFY_STORE_DOMAIN     e.g.  grouphoodies.myshopify.com
+//   SHOPIFY_ADMIN_API_TOKEN  from Shopify Admin → Apps → Develop apps →
+//                            create a private app with write_files + read_files scopes
+
+async function shopifyAdmin(query, variables = {}) {
+  const domain = process.env.SHOPIFY_STORE_DOMAIN;
+  const token  = process.env.SHOPIFY_ADMIN_API_TOKEN;
+
+  if (!domain || !token) {
+    throw new Error('SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_API_TOKEN env vars are not set.');
+  }
+
+  const res = await fetch(
+    `https://${domain}/admin/api/2024-10/graphql.json`,
+    {
+      method:  'POST',
+      headers: {
+        'Content-Type':             'application/json',
+        'X-Shopify-Access-Token':   token,
+      },
+      body: JSON.stringify({ query, variables }),
+    }
+  );
+
+  if (!res.ok) throw new Error(`Shopify Admin API responded ${res.status}`);
+  const json = await res.json();
+  if (json.errors?.length) throw new Error(json.errors[0].message);
+  return json.data;
+}
+
+// Step 1 – Ask Shopify for a pre-signed staging URL
+async function stageUpload(filename, mimeType, fileSize) {
+  const data = await shopifyAdmin(
+    `mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
+       stagedUploadsCreate(input: $input) {
+         stagedTargets {
+           url
+           resourceUrl
+           parameters { name value }
+         }
+         userErrors { field message }
+       }
+     }`,
+    {
+      input: [{
+        resource:   'FILE',
+        filename,
+        mimeType,
+        httpMethod: 'POST',
+        fileSize:   String(fileSize),
+      }],
+    }
+  );
+
+  const errs = data.stagedUploadsCreate.userErrors;
+  if (errs.length) throw new Error(`stagedUploadsCreate: ${errs[0].message}`);
+  return data.stagedUploadsCreate.stagedTargets[0];
+}
+
+// Step 2 – Push the file to Shopify's staging bucket (S3 / GCS)
+async function pushToStaged(target, buffer, mimeType, filename) {
+  const fd = new FormData();
+  // Shopify requires their signed parameters to be added first, file last
+  target.parameters.forEach(({ name, value }) => fd.append(name, value));
+  fd.append('file', new Blob([buffer], { type: mimeType }), filename);
+
+  const res = await fetch(target.url, { method: 'POST', body: fd });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Staged push failed ${res.status}: ${body.slice(0, 300)}`);
+  }
+}
+
+// Step 3 – Register the staged file in Shopify's Files section and get the CDN URL
+async function registerFile(resourceUrl) {
+  const data = await shopifyAdmin(
+    `mutation fileCreate($files: [FileCreateInput!]!) {
+       fileCreate(files: $files) {
+         files {
+           ... on GenericFile { id url }
+           ... on MediaImage   { id image { url } }
+         }
+         userErrors { field message }
+       }
+     }`,
+    {
+      files: [{
+        originalSource: resourceUrl,
+        contentType:    'FILE',
+      }],
+    }
+  );
+
+  const errs = data.fileCreate.userErrors;
+  if (errs.length) throw new Error(`fileCreate: ${errs[0].message}`);
+
+  const file = data.fileCreate.files[0];
+  // GenericFile exposes .url; MediaImage exposes .image.url
+  return file?.url ?? file?.image?.url ?? resourceUrl;
+}
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -176,40 +279,43 @@ app.get('/api/logos/:companyName', (req, res) => {
 
 // ── POST /api/upload-artwork ──────────────────────────────────────────────────
 // Receives a multipart file upload from the Shopify logo-customiser block,
-// stores it in Vercel Blob, and returns the permanent public URL.
+// uploads it to Shopify's own CDN via the Admin API staged upload flow,
+// and returns the permanent Shopify CDN URL.
 //
-// Requires environment variable: BLOB_READ_WRITE_TOKEN
-// Set it in Vercel dashboard → Storage → link your Blob store to this project.
+// No external storage needed — files land in Shopify Admin → Content → Files.
+//
+// Required env vars in Vercel:
+//   SHOPIFY_STORE_DOMAIN      grouphoodies.myshopify.com
+//   SHOPIFY_ADMIN_API_TOKEN   from a private app with write_files scope
 app.post('/api/upload-artwork', upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided.' });
   }
 
+  const { buffer, originalname, mimetype, size } = req.file;
+
   try {
-    const shop      = (req.body.shop || 'unknown').replace(/[^a-z0-9.-]/gi, '_');
-    const timestamp = Date.now();
-    const safeName  = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
-    const pathname  = `artwork/${shop}/${timestamp}-${safeName}`;
+    // 1. Get a pre-signed staging URL from Shopify
+    const target = await stageUpload(originalname, mimetype, size);
 
-    const blob = await put(pathname, req.file.buffer, {
-      access:          'public',
-      contentType:     req.file.mimetype || 'application/octet-stream',
-      addRandomSuffix: false,
-    });
+    // 2. Upload the file directly to Shopify's staging bucket (S3/GCS)
+    await pushToStaged(target, buffer, mimetype, originalname);
 
-    console.log(`[upload-artwork] stored ${blob.pathname} (${req.file.size} bytes)`);
+    // 3. Register the staged file → moves it to Shopify CDN and returns final URL
+    const cdnUrl = await registerFile(target.resourceUrl);
+
+    console.log(`[upload-artwork] stored on Shopify CDN: ${cdnUrl} (${size} bytes)`);
 
     return res.status(200).json({
-      url:      blob.url,
-      pathname: blob.pathname,
-      filename: req.file.originalname,
-      size:     req.file.size,
-      type:     req.file.mimetype,
+      url:      cdnUrl,
+      filename: originalname,
+      size,
+      type:     mimetype,
     });
   } catch (err) {
-    console.error('[upload-artwork] error:', err);
+    console.error('[upload-artwork] error:', err.message);
     return res.status(500).json({
-      error: 'Upload failed. Please try again or email your artwork after checkout.',
+      error: err.message || 'Upload failed. Please try again or email your artwork after checkout.',
     });
   }
 });
@@ -225,6 +331,119 @@ app.use((err, _req, res, _next) => {
   console.error('[server error]', err);
   return res.status(500).json({ error: 'Internal server error.' });
 });
+
+// ── POST /api/webhooks/order-created ─────────────────────────────────────────
+// Triggered by Shopify when a new order is placed.
+// Reads any artwork line item properties and appends them to the order note
+// so they are visible immediately when opening the order in the admin.
+//
+// Setup:
+//   1. Shopify Admin → Settings → Notifications → Webhooks
+//      → Add webhook: Event = "Order creation"
+//        URL = https://your-app.vercel.app/api/webhooks/order-created
+//      → Copy the signing secret shown after saving.
+//   2. Add to Vercel env vars:
+//        SHOPIFY_WEBHOOK_SECRET   (the secret copied above)
+//
+// The route uses express.raw() so we get the unmodified body needed for
+// HMAC verification — this must be registered before any JSON body-parser.
+
+function verifyWebhookHmac(rawBody, hmacHeader) {
+  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+  if (!secret || !hmacHeader) return false;
+  try {
+    const computed = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('base64');
+    // timingSafeEqual needs same-length buffers
+    const a = Buffer.from(computed);
+    const b = Buffer.from(hmacHeader);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+app.post(
+  '/api/webhooks/order-created',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    // Always respond 200 quickly so Shopify doesn't retry unnecessarily —
+    // we do the actual work after sending the response.
+    const hmac = req.headers['x-shopify-hmac-sha256'];
+    if (!verifyWebhookHmac(req.body, hmac)) {
+      console.warn('[webhook] rejected — invalid HMAC');
+      return res.status(401).send('Unauthorized');
+    }
+
+    // Acknowledge immediately
+    res.status(200).send('OK');
+
+    // Parse order payload
+    let order;
+    try {
+      order = JSON.parse(req.body.toString());
+    } catch {
+      console.error('[webhook] could not parse order JSON');
+      return;
+    }
+
+    // Collect artwork details from every line item that has an Artwork URL
+    const artworkLines = [];
+    for (const item of order.line_items ?? []) {
+      const prop = (name) =>
+        (item.properties ?? []).find((p) => p.name === name)?.value ?? null;
+
+      const artworkUrl = prop('Artwork URL');
+      if (!artworkUrl) continue;
+
+      const parts = [`• ${item.name} (qty ${item.quantity})`];
+      const position = prop('Logo Position');
+      const decoType = prop('Decoration Type');
+      const filename  = prop('Artwork Filename');
+      const notes     = prop('Decoration Notes');
+
+      if (decoType) parts.push(`  Decoration : ${decoType}`);
+      if (position) parts.push(`  Position   : ${position}`);
+      if (filename) parts.push(`  Filename   : ${filename}`);
+      if (notes)    parts.push(`  Notes      : ${notes}`);
+      parts.push(`  Artwork    : ${artworkUrl}`);
+
+      artworkLines.push(parts.join('\n'));
+    }
+
+    if (artworkLines.length === 0) {
+      console.log(`[webhook] order #${order.order_number} — no artwork properties, skipping`);
+      return;
+    }
+
+    const section   = `━━ Artwork Files ━━\n${artworkLines.join('\n\n')}`;
+    const existing  = (order.note ?? '').trim();
+    const newNote   = existing ? `${existing}\n\n${section}` : section;
+
+    try {
+      const data = await shopifyAdmin(
+        `mutation orderUpdate($input: OrderInput!) {
+           orderUpdate(input: $input) {
+             order { id orderNumber note }
+             userErrors { field message }
+           }
+         }`,
+        { input: { id: `gid://shopify/Order/${order.id}`, note: newNote } }
+      );
+
+      const errs = data.orderUpdate.userErrors;
+      if (errs.length) {
+        console.error(`[webhook] orderUpdate userErrors for #${order.order_number}:`, errs);
+      } else {
+        console.log(`[webhook] order #${order.order_number} note updated with ${artworkLines.length} artwork link(s)`);
+      }
+    } catch (err) {
+      console.error(`[webhook] failed to update order #${order.order_number}:`, err.message);
+    }
+  }
+);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
