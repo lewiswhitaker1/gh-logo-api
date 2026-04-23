@@ -11,26 +11,36 @@ const crypto  = require('crypto');
 //                            create a private app with write_files + read_files scopes
 
 async function shopifyAdmin(query, variables = {}) {
-  const domain = process.env.SHOPIFY_STORE_DOMAIN;
-  const token  = process.env.SHOPIFY_ADMIN_API_TOKEN;
+  const rawDomain = process.env.SHOPIFY_STORE_DOMAIN;
+  const token     = process.env.SHOPIFY_ADMIN_API_TOKEN;
 
-  if (!domain || !token) {
+  if (!rawDomain || !token) {
     throw new Error('SHOPIFY_STORE_DOMAIN or SHOPIFY_ADMIN_API_TOKEN env vars are not set.');
   }
 
-  const res = await fetch(
-    `https://${domain}/admin/api/2024-10/graphql.json`,
-    {
+  // Strip any accidental protocol prefix or trailing slashes/spaces
+  const domain = rawDomain.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const url    = `https://${domain}/admin/api/2024-10/graphql.json`;
+
+  let res;
+  try {
+    res = await fetch(url, {
       method:  'POST',
       headers: {
-        'Content-Type':             'application/json',
-        'X-Shopify-Access-Token':   token,
+        'Content-Type':           'application/json',
+        'X-Shopify-Access-Token': token,
       },
       body: JSON.stringify({ query, variables }),
-    }
-  );
+    });
+  } catch (netErr) {
+    // Surface the real cause (bad domain, DNS failure, etc.)
+    throw new Error(`Network error reaching Shopify Admin API at ${url}: ${netErr.message}`);
+  }
 
-  if (!res.ok) throw new Error(`Shopify Admin API responded ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Shopify Admin API responded ${res.status}: ${body.slice(0, 300)}`);
+  }
   const json = await res.json();
   if (json.errors?.length) throw new Error(json.errors[0].message);
   return json.data;
@@ -323,7 +333,7 @@ app.post('/api/upload-artwork', upload.single('file'), async (req, res) => {
       type:     mimetype,
     });
   } catch (err) {
-    console.error('[upload-artwork] error:', err.message);
+    console.error('[upload-artwork] error:', err.message, err.stack);
     return res.status(500).json({
       error: err.message || 'Upload failed. Please try again or email your artwork after checkout.',
     });
