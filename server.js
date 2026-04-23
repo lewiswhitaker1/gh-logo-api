@@ -111,23 +111,33 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-// Reads SHOPIFY_STORE_URLS env var (comma-separated) so only your store can
-// call these endpoints in production. Falls back to allowing all in dev.
-const ALLOWED_ORIGINS = (process.env.SHOPIFY_STORE_URLS || '')
+// The Admin API token never leaves this server, so broad CORS is safe here.
+// We check the origin hostname against SHOPIFY_STORE_URLS if set, but fall
+// back to allowing all origins so a misconfigured env var never blocks uploads.
+const ALLOWED_HOSTNAMES = (process.env.SHOPIFY_STORE_URLS || '')
   .split(',')
-  .map((s) => s.trim())
+  .map((s) => {
+    s = s.trim().replace(/\/+$/, ''); // strip trailing slashes
+    try { return new URL(s).hostname; } catch { return s; }
+  })
   .filter(Boolean);
+
+function isOriginAllowed(origin) {
+  if (!origin) return true;                      // server-to-server / Postman
+  if (ALLOWED_HOSTNAMES.length === 0) return true; // no restriction configured
+  try {
+    const host = new URL(origin).hostname;
+    return ALLOWED_HOSTNAMES.some(
+      (h) => host === h || host === `www.${h}` || `www.${host}` === h
+    );
+  } catch {
+    return false;
+  }
+}
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. Postman, server-to-server)
-      if (!origin) return callback(null, true);
-      // Allow all in dev / if no origins configured
-      if (ALLOWED_ORIGINS.length === 0) return callback(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-      callback(new Error(`CORS: origin ${origin} not allowed`));
-    },
+    origin: (origin, callback) => callback(null, isOriginAllowed(origin)),
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'X-Requested-With'],
   })
