@@ -1,18 +1,55 @@
 const express = require('express');
-const cors = require('cors');
-const Fuse = require('fuse.js');
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
+const cors    = require('cors');
+const Fuse    = require('fuse.js');
+const multer  = require('multer');
+const { put } = require('@vercel/blob');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// ── CORS ──────────────────────────────────────────────────────────────────────
+// Reads SHOPIFY_STORE_URLS env var (comma-separated) so only your store can
+// call these endpoints in production. Falls back to allowing all in dev.
+const ALLOWED_ORIGINS = (process.env.SHOPIFY_STORE_URLS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-// Serve the 'public' folder so your frontend can actually access the downloaded images
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. Postman, server-to-server)
+      if (!origin) return callback(null, true);
+      // Allow all in dev / if no origins configured
+      if (ALLOWED_ORIGINS.length === 0) return callback(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Requested-With'],
+  })
+);
 
+// ── Multer — in-memory storage for Vercel Blob uploads ────────────────────────
+const ALLOWED_MIME = new Set([
+  'image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml',
+  'image/webp', 'application/pdf', 'application/postscript',
+]);
+const ALLOWED_EXT = /\.(png|jpe?g|svg|webp|pdf|ai|eps)$/i;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB (requires Vercel Pro; Hobby cap is 4.5 MB)
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME.has(file.mimetype) || ALLOWED_EXT.test(file.originalname)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type not allowed: ${file.mimetype}`));
+    }
+  },
+});
+
+// Extracted logo data from the provided HTML
 const logos = [
     { company: "ADC", url: "https://www.pencarrie.com/storage/phoenix/brands/e6iKTlXTcXCqF3hgLBsA5LvoblUyBvyUIhidkxRK.jpg" },
     { company: "Anthem", url: "https://www.pencarrie.com/storage/phoenix/brands/2uvnvDjUbGneMO0asopLsjSfCuB5uIDi5w3duDkI.jpeg" },
@@ -93,102 +130,103 @@ const logos = [
     { company: "Yoko", url: "https://www.pencarrie.com/storage/phoenix/brands/oE81VRI18x6E7QjiS4P21aR0tAyf76RAjISfw0fA.jpeg" }
 ];
 
-const LOGO_DIR = path.join(__dirname, 'public', 'logos');
-
-// Helper function to download an image
-const downloadImage = (url, filepath) => {
-    return new Promise((resolve, reject) => {
-        https.get(url, (res) => {
-            if (res.statusCode === 200) {
-                const writeStream = fs.createWriteStream(filepath);
-                res.pipe(writeStream);
-                writeStream.on('finish', () => {
-                    writeStream.close();
-                    resolve();
-                });
-            } else {
-                reject(new Error(`Failed to download ${url}: Status ${res.statusCode}`));
-            }
-        }).on('error', reject);
-    });
-};
-
-// Initialize server data and download missing images
-const initializeLogos = async () => {
-    console.log('Checking logo files...');
-
-    // Create the directory if it doesn't exist
-    if (!fs.existsSync(LOGO_DIR)) {
-        fs.mkdirSync(LOGO_DIR, { recursive: true });
-        console.log('Created public/logos directory.');
-    }
-
-    // Loop through logos and download if necessary
-    for (let i = 0; i < logos.length; i++) {
-        const logo = logos[i];
-
-        // Extract extension (e.g., .jpg or .png) and create a clean filename
-        const ext = path.extname(new URL(logo.url).pathname);
-        const safeCompanyName = logo.company.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-        const filename = `${safeCompanyName}${ext}`;
-        const filepath = path.join(LOGO_DIR, filename);
-
-        // Update the array in memory to point to the local file instead of external URL
-        logo.localUrl = `/logos/${filename}`;
-
-        // If the file doesn't exist locally, download it
-        if (!fs.existsSync(filepath)) {
-            console.log(`Downloading: ${logo.company}...`);
-            try {
-                await downloadImage(logo.url, filepath);
-            } catch (err) {
-                console.error(`Error downloading ${logo.company}:`, err.message);
-                // Fallback to the remote URL if download fails
-                logo.localUrl = logo.url;
-            }
-        }
-    }
-
-    console.log('All logos are ready locally!');
-};
-
-// --- Fuse.js Setup ---
+// Configure Fuse.js options
 const fuseOptions = {
+    // isCaseSensitive: false, // Default is false
     includeScore: true,
+    // Threshold determines how "fuzzy" the search is. 
+    // 0.0 requires a perfect match, 1.0 matches anything. 0.4 is a good sweet spot for typos.
     threshold: 0.4,
-    keys: ['company']
+    keys: ['company'] // Tell Fuse to search within the 'company' property
 };
 
+// Initialize Fuse with your data and options
 const fuse = new Fuse(logos, fuseOptions);
 
-// --- API Endpoints ---
+// Endpoint to retrieve all logos
 app.get('/api/logos', (req, res) => {
     res.json({
         success: true,
         count: logos.length,
-        data: logos // Now includes the localUrl property
+        data: logos
     });
 });
 
+// Updated fuzzy-search endpoint
 app.get('/api/logos/:companyName', (req, res) => {
     const query = req.params.companyName;
+
+    // Perform the fuzzy search
     const results = fuse.search(query);
 
+    // Fuse returns an array of matches ordered by best match first
     if (results.length > 0) {
+        // We grab the highest scoring match (index 0) and extract the actual item
+        const bestMatch = results[0].item;
+
         res.json({
             success: true,
-            confidenceScore: results[0].score,
-            data: results[0].item // Now includes the localUrl property
+            confidenceScore: results[0].score, // Optional: Shows how close the match was (closer to 0 is better)
+            data: bestMatch
         });
     } else {
         res.status(404).json({ success: false, message: "Company logo not found" });
     }
 });
 
-// --- Start Server ---
-// We wrap the server start in our initialization function
-initializeLogos().then(() => {
-    app.listen(PORT, () => {
-        console.log(`Server is running on http://localhost:${PORT}`);
+// ── POST /api/upload-artwork ──────────────────────────────────────────────────
+// Receives a multipart file upload from the Shopify logo-customiser block,
+// stores it in Vercel Blob, and returns the permanent public URL.
+//
+// Requires environment variable: BLOB_READ_WRITE_TOKEN
+// Set it in Vercel dashboard → Storage → link your Blob store to this project.
+app.post('/api/upload-artwork', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file provided.' });
+  }
+
+  try {
+    const shop      = (req.body.shop || 'unknown').replace(/[^a-z0-9.-]/gi, '_');
+    const timestamp = Date.now();
+    const safeName  = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const pathname  = `artwork/${shop}/${timestamp}-${safeName}`;
+
+    const blob = await put(pathname, req.file.buffer, {
+      access:          'public',
+      contentType:     req.file.mimetype || 'application/octet-stream',
+      addRandomSuffix: false,
     });
+
+    console.log(`[upload-artwork] stored ${blob.pathname} (${req.file.size} bytes)`);
+
+    return res.status(200).json({
+      url:      blob.url,
+      pathname: blob.pathname,
+      filename: req.file.originalname,
+      size:     req.file.size,
+      type:     req.file.mimetype,
+    });
+  } catch (err) {
+    console.error('[upload-artwork] error:', err);
+    return res.status(500).json({
+      error: 'Upload failed. Please try again or email your artwork after checkout.',
+    });
+  }
+});
+
+// Multer error handler (file too large, wrong type, etc.)
+app.use((err, _req, res, _next) => {
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(422).json({ error: 'File is too large. Maximum size is 20 MB.' });
+  }
+  if (err.message?.startsWith('File type not allowed')) {
+    return res.status(422).json({ error: err.message });
+  }
+  console.error('[server error]', err);
+  return res.status(500).json({ error: 'Internal server error.' });
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
 });
