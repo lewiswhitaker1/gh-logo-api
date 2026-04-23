@@ -266,7 +266,7 @@ const fuseOptions = {
 // Initialize Fuse with your data and options
 const fuse = new Fuse(logos, fuseOptions);
 
-// ── Diagnostic endpoint ───────────────────────────────────────────────────────
+// ── Diagnostic endpoint
 // Visit https://your-vercel-app.vercel.app/api/shopify-check to confirm the
 // Admin API connection works. Safe to leave deployed — it never exposes the
 // token and only returns the store name.
