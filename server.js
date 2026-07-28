@@ -355,6 +355,13 @@ const {
   calculateCartDiscounts
 } = require("./discount-rules");
 
+const path = require("path");
+
+// Serve storefront JS script
+app.get(["/volume-pricing-storefront.js", "/api/volume-pricing-storefront.js"], (req, res) => {
+  res.sendFile(path.join(__dirname, "volume-pricing-storefront.js"));
+});
+
 // 1. Tiers endpoint
 app.get(["/api/volume-pricing/tiers", "/api/tiers"], (req, res) => {
   console.log(`[VolumePricing API] GET /tiers requested`);
