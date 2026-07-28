@@ -412,8 +412,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
 
     const draftLineItems = calculation.items.map((item) => {
       const lineItem = {
-        quantity: item.quantity,
-        price: item.discountedUnitPrice
+        quantity: item.quantity
       };
 
       if (item.id && !isNaN(Number(item.id))) {
@@ -422,6 +421,15 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         lineItem.variant_id = Number(item.variant_id);
       } else {
         lineItem.title = item.title || item.name || `Product (${item.id})`;
+        lineItem.price = item.discountedUnitPrice;
+      }
+
+      if (item.appliedPercentage > 0) {
+        lineItem.applied_discount = {
+          title: `${item.appliedPercentage}% Volume Discount`,
+          value_type: "percentage",
+          value: String(item.appliedPercentage)
+        };
       }
 
       if (item.properties) {
