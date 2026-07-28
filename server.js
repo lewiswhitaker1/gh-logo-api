@@ -357,6 +357,7 @@ const {
 
 // 1. Tiers endpoint
 app.get(["/api/volume-pricing/tiers", "/api/tiers"], (req, res) => {
+  console.log(`[VolumePricing API] GET /tiers requested`);
   res.json({
     success: true,
     tiers: DEFAULT_TIERS,
@@ -368,7 +369,10 @@ app.get(["/api/volume-pricing/tiers", "/api/tiers"], (req, res) => {
 app.post(["/api/volume-pricing/calculate", "/api/calculate"], (req, res) => {
   try {
     const { items, customTiers } = req.body;
+    console.log(`[VolumePricing API] POST /calculate requested with ${items?.length || 0} item(s)`);
+
     if (!items || !Array.isArray(items)) {
+      console.warn(`[VolumePricing API] Invalid payload received in /calculate:`, req.body);
       return res.status(400).json({
         success: false,
         error: "Invalid request payload. Expected { items: [...] }"
@@ -380,13 +384,14 @@ app.post(["/api/volume-pricing/calculate", "/api/calculate"], (req, res) => {
       : DEFAULT_TIERS;
 
     const result = calculateCartDiscounts({ items }, tiers);
+    console.log(`[VolumePricing API] Discount calculation complete. Applied: ${result.applied}, Total discount: £${result.totalDiscountAmount}`);
 
     res.json({
       success: true,
       data: result
     });
   } catch (error) {
-    console.error("Error calculating discount:", error);
+    console.error("[VolumePricing API Error] Error calculating discount:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error while calculating discount"
@@ -401,7 +406,11 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
 
   const { items, customTiers, note, customer } = req.body;
 
+  console.log(`[VolumePricing API] POST /create-checkout requested for shop: ${shop}`);
+  console.log(`[VolumePricing API] Items payload (${items?.length || 0} items):`, JSON.stringify(items));
+
   if (!items || !Array.isArray(items) || items.length === 0) {
+    console.warn(`[VolumePricing API] Empty or invalid items array in /create-checkout`);
     return res.status(400).json({
       success: false,
       error: "Invalid request payload. Expected non-empty items array."
@@ -410,6 +419,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
 
   try {
     const calculation = calculateCartDiscounts({ items }, customTiers);
+    console.log(`[VolumePricing API] Calculation summary: Applied=${calculation.applied}, TotalDiscount=£${calculation.totalDiscountAmount}`);
 
     const draftLineItems = calculation.items.map((item) => {
       const lineItem = {
@@ -443,6 +453,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
     });
 
     if (!shop || !accessToken) {
+      console.warn(`[VolumePricing API Warning] Missing shop domain or access token. Returning fallback calculation response.`);
       return res.json({
         success: true,
         mode: "fallback",
@@ -452,6 +463,8 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
     }
 
     const shopUrl = shop.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    console.log(`[VolumePricing API] Calling Shopify Admin API draft_orders.json on ${shopUrl}...`);
+
     const response = await fetch(`https://${shopUrl}/admin/api/2024-10/draft_orders.json`, {
       method: "POST",
       headers: {
@@ -471,6 +484,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
     const data = await response.json();
 
     if (data.draft_order && data.draft_order.invoice_url) {
+      console.log(`[VolumePricing API Success] Draft Order Created! ID: ${data.draft_order.id}, Invoice URL: ${data.draft_order.invoice_url}`);
       return res.json({
         success: true,
         mode: "draft_order",
@@ -479,7 +493,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         calculation
       });
     } else {
-      console.error("Shopify Draft Order Creation Error:", data);
+      console.error("[VolumePricing API Error] Shopify Draft Order Creation Error:", JSON.stringify(data));
       return res.status(400).json({
         success: false,
         error: "Failed to create Shopify Draft Order",
@@ -487,7 +501,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
       });
     }
   } catch (error) {
-    console.error("Error creating checkout:", error);
+    console.error("[VolumePricing API Exception] Error creating checkout:", error);
     res.status(500).json({
       success: false,
       error: "Internal server error while creating checkout: " + error.message

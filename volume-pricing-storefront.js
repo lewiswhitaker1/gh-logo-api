@@ -1,5 +1,5 @@
 /**
- * Volume Pricing Storefront Script (with Toggleable Debug Logging)
+ * Volume Pricing Storefront Script (with Toggleable & Highlighted Debug Logging)
  * Connects Shopify Theme Cart / Checkout buttons to your unified Vercel API.
  */
 
@@ -30,7 +30,8 @@
     console.error(`❌ [VolumePricing Error] ${message}`, ...args);
   }
 
-  log("Script initialized", { API_BASE_URL, isDebug });
+  // Always output an info banner so developer console shows confirmation immediately
+  console.info("🟢 [VolumePricing] Storefront script loaded successfully!", { API_BASE_URL, isDebug });
 
   async function getShopifyCart() {
     log("Fetching Shopify cart from /cart.js...");
@@ -105,7 +106,6 @@
 
         if (data.success && data.checkoutUrl) {
           log(`🚀 Redirecting to discounted checkout URL: ${data.checkoutUrl}`);
-          // Slight delay if in debug mode so logs can be read in console
           if (isDebug) {
             console.log("⏱️ Pausing 2 seconds for debug console inspection before redirecting...");
             setTimeout(() => {
@@ -124,6 +124,14 @@
       }
     });
   }
+
+  // Auto-attach click handler to checkout buttons via event delegation
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[name="checkout"], form[action="/cart"] [type="submit"], a[href="/checkout"], .cart__checkout');
+    if (btn) {
+      log("Checkout button clicked!", { element: btn });
+    }
+  }, true);
 
   window.VolumePricing = {
     isDebug,
