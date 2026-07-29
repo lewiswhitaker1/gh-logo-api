@@ -445,14 +445,23 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         lineItem.variant_id = Number(item.variant_id);
       } else {
         lineItem.title = item.title || item.name || `Product (${item.id})`;
-        lineItem.price = item.discountedUnitPrice;
       }
 
-      if (item.appliedPercentage > 0) {
+      // Explicitly set unit price (base garment price + per-unit decoration fee)
+      const baseUnitPrice = item.originalUnitPrice || item.price || 0;
+      const decoFee = item.decorationFeePerUnit || 0;
+      const fullUnitPrice = baseUnitPrice + decoFee;
+
+      if (fullUnitPrice > 0) {
+        lineItem.price = fullUnitPrice.toFixed(2);
+      }
+
+      // Apply volume discount as a fixed amount on the line item
+      if (item.lineDiscountAmount && item.lineDiscountAmount > 0) {
         lineItem.applied_discount = {
           title: `${item.appliedPercentage}% Volume Discount`,
-          value_type: "percentage",
-          value: String(item.appliedPercentage)
+          value_type: "fixed_amount",
+          value: String(item.lineDiscountAmount.toFixed(2))
         };
       }
 
