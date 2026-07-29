@@ -167,6 +167,12 @@ const fuseOptions = {
 
 const fuse = new Fuse(logos, fuseOptions);
 
+const { handleLiveViewsRequest } = require('./live-views');
+
+app.get('/api/live-views', handleLiveViewsRequest);
+app.get('/api/live-views/:productId', handleLiveViewsRequest);
+app.post('/api/live-views', handleLiveViewsRequest);
+
 app.get('/api/shopify-check', async (_req, res) => {
   const rawDomain = process.env.SHOPIFY_STORE_DOMAIN || '';
   const token     = process.env.SHOPIFY_ADMIN_API_TOKEN || '';
