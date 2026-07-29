@@ -357,6 +357,7 @@ app.post(
 // ---------------------------------------------------------------------------
 const {
   DEFAULT_TIERS,
+  DECORATION_TIERS,
   EXCLUDED_VENDORS,
   calculateCartDiscounts
 } = require("./discount-rules");
@@ -375,6 +376,15 @@ app.get(["/api/volume-pricing/tiers", "/api/tiers"], (req, res) => {
     success: true,
     tiers: DEFAULT_TIERS,
     excludedVendors: EXCLUDED_VENDORS
+  });
+});
+
+// 1b. Decoration pricing tiers endpoint
+app.get(["/api/volume-pricing/decoration-tiers", "/api/decoration-tiers"], (req, res) => {
+  console.log(`[VolumePricing API] GET /decoration-tiers requested`);
+  res.json({
+    success: true,
+    tiers: DECORATION_TIERS
   });
 });
 
@@ -397,7 +407,7 @@ app.post(["/api/volume-pricing/calculate", "/api/calculate"], (req, res) => {
       : DEFAULT_TIERS;
 
     const result = calculateCartDiscounts({ items }, tiers);
-    console.log(`[VolumePricing API] Discount calculation complete. Applied: ${result.applied}, Total discount: £${result.totalDiscountAmount}`);
+    console.log(`[VolumePricing API] Discount calculation complete. Applied: ${result.applied}, Total discount: £${result.totalDiscountAmount}, Decoration cost: £${result.totalDecorationCost}`);
 
     res.json({
       success: true,
@@ -432,7 +442,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
 
   try {
     const calculation = calculateCartDiscounts({ items }, customTiers);
-    console.log(`[VolumePricing API] Calculation summary: Applied=${calculation.applied}, TotalDiscount=£${calculation.totalDiscountAmount}`);
+    console.log(`[VolumePricing API] Calculation summary: Applied=${calculation.applied}, TotalDiscount=£${calculation.totalDiscountAmount}, DecorationCost=£${calculation.totalDecorationCost}`);
 
     const draftLineItems = calculation.items.map((item) => {
       const lineItem = {
@@ -445,13 +455,15 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         lineItem.variant_id = Number(item.variant_id);
       } else {
         lineItem.title = item.title || item.name || `Product (${item.id})`;
+        lineItem.price = item.finalUnitPrice || item.discountedUnitPrice;
       }
 
-      // Set unit price directly to final calculated unit price (discounted garment base + decoration fees)
-      if (item.discountedUnitPrice !== undefined && item.discountedUnitPrice > 0) {
-        lineItem.price = item.discountedUnitPrice.toFixed(2);
-      } else if (item.price !== undefined && item.price > 0) {
-        lineItem.price = Number(item.price).toFixed(2);
+      if (item.appliedPercentage > 0) {
+        lineItem.applied_discount = {
+          title: `${item.appliedPercentage}% Volume Discount`,
+          value_type: "percentage",
+          value: String(item.appliedPercentage)
+        };
       }
 
       if (item.properties) {

@@ -1,5 +1,5 @@
 /**
- * Tiered Volume Pricing Discount Rules Engine
+ * Tiered Volume Pricing & Decoration Pricing Rules Engine
  */
 
 const EXCLUDED_VENDORS = ["Group Hoodies"];
@@ -14,86 +14,18 @@ const DEFAULT_TIERS = [
   { minQuantity: 10,  percentage: 10.0 }
 ];
 
-// Tiered Decoration Application Pricing (Price per application based on quantity)
-const PRINT_TIERS = [
-  { minQuantity: 1000, price: 1.25 },
-  { minQuantity: 750,  price: 1.50 },
-  { minQuantity: 500,  price: 2.00 },
-  { minQuantity: 250,  price: 2.50 },
-  { minQuantity: 100,  price: 3.50 },
-  { minQuantity: 25,   price: 4.50 },
-  { minQuantity: 9,    price: 5.99 },
-  { minQuantity: 1,    price: 7.99 }
+// ---------------------------------------------------------------------------
+// Decoration pricing tiers (per unit, per position)
+// Costs decrease as total order quantity increases.
+// ---------------------------------------------------------------------------
+const DECORATION_TIERS = [
+  { minQuantity: 250, print: 2.00, embroidery: 3.50 },
+  { minQuantity: 100, print: 2.50, embroidery: 4.00 },
+  { minQuantity: 50,  print: 3.00, embroidery: 5.00 },
+  { minQuantity: 25,  print: 4.00, embroidery: 6.00 },
+  { minQuantity: 10,  print: 5.00, embroidery: 7.00 },
+  { minQuantity: 1,   print: 6.00, embroidery: 8.00 }
 ];
-
-const EMBROIDERY_TIERS = [
-  { minQuantity: 1000, price: 1.25 },
-  { minQuantity: 750,  price: 1.75 },
-  { minQuantity: 500,  price: 2.25 },
-  { minQuantity: 250,  price: 2.75 },
-  { minQuantity: 100,  price: 3.75 },
-  { minQuantity: 25,   price: 4.75 },
-  { minQuantity: 9,    price: 6.25 },
-  { minQuantity: 1,    price: 7.99 }
-];
-
-/**
- * Gets the unit price per application based on total quantity and decoration type
- */
-function getDecorationUnitPrice(type, totalQty) {
-  const normType = String(type).toLowerCase();
-  const tiers = normType.includes('embroider') ? EMBROIDERY_TIERS : PRINT_TIERS;
-  const sortedTiers = [...tiers].sort((a, b) => b.minQuantity - a.minQuantity);
-  for (const tier of sortedTiers) {
-    if (totalQty >= tier.minQuantity) {
-      return tier.price;
-    }
-  }
-  return 0;
-}
-
-/**
- * Parses line item properties to extract count of print and embroidery positions
- */
-function parseDecorationCounts(properties) {
-  let printCount = 0;
-  let embroideryCount = 0;
-
-  if (!properties) return { printCount, embroideryCount };
-
-  const propsObj = {};
-  if (Array.isArray(properties)) {
-    properties.forEach((p) => {
-      if (p && p.name) propsObj[p.name] = p.value;
-    });
-  } else if (typeof properties === "object") {
-    Object.assign(propsObj, properties);
-  }
-
-  if (propsObj['_print_count'] !== undefined) printCount = parseInt(propsObj['_print_count'], 10) || 0;
-  if (propsObj['_embroidery_count'] !== undefined) embroideryCount = parseInt(propsObj['_embroidery_count'], 10) || 0;
-
-  if (printCount === 0 && embroideryCount === 0 && propsObj['Decoration Type']) {
-    const decoType = String(propsObj['Decoration Type']).toLowerCase();
-    const positions = propsObj['Logo Position'] ? String(propsObj['Logo Position']).split(',').length : 1;
-
-    if (decoType.includes('print') && !decoType.includes('embroidery')) {
-      printCount = positions;
-    } else if (decoType.includes('embroidery') || decoType.includes('embroider')) {
-      if (!decoType.includes('print')) {
-        embroideryCount = positions;
-      } else {
-        const parts = decoType.split(',');
-        parts.forEach((part) => {
-          if (part.toLowerCase().includes('print')) printCount++;
-          if (part.toLowerCase().includes('embroidery') || part.toLowerCase().includes('embroider')) embroideryCount++;
-        });
-      }
-    }
-  }
-
-  return { printCount, embroideryCount };
-}
 
 /**
  * Gets the applicable discount percentage based on total quantity
@@ -109,6 +41,65 @@ function getDiscountPercentage(totalQty, tiers = DEFAULT_TIERS) {
 }
 
 /**
+ * Gets the per-unit decoration cost for a given type and total quantity.
+ * @param {'print'|'embroidery'|null} type  - decoration type (null/other = 0)
+ * @param {number} totalQty                 - total units in the order/product group
+ * @param {Array}  decoTiers                - optional custom decoration tiers
+ * @returns {number} cost per unit per position
+ */
+function getDecorationCostPerUnit(type, totalQty, decoTiers = DECORATION_TIERS) {
+  if (!type || (type !== 'print' && type !== 'embroidery')) return 0;
+  const sorted = [...decoTiers].sort((a, b) => b.minQuantity - a.minQuantity);
+  for (const tier of sorted) {
+    if (totalQty >= tier.minQuantity) {
+      return tier[type] || 0;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Extracts decoration info from a cart item's properties.
+ * Properties come from the product customiser as an array of {name, value}
+ * or as a plain object.
+ */
+function extractDecorationInfo(properties) {
+  if (!properties) return { type: null, positions: 0 };
+
+  // Normalise: accept both array-of-objects and plain object
+  let lookup;
+  if (Array.isArray(properties)) {
+    lookup = (key) => {
+      const p = properties.find((prop) => prop.name === key);
+      return p ? p.value : null;
+    };
+  } else if (typeof properties === 'object') {
+    lookup = (key) => properties[key] || null;
+  } else {
+    return { type: null, positions: 0 };
+  }
+
+  const rawType = (lookup('Decoration Type') || lookup('Decoration') || '').toLowerCase().trim();
+
+  // Determine normalised type
+  let type = null;
+  if (rawType.includes('embroider')) {
+    type = 'embroidery';
+  } else if (rawType.includes('print')) {
+    type = 'print';
+  }
+  // "None - Plain garments" or missing → null (no decoration cost)
+
+  // Count positions from "Logo Position" property (comma-separated list)
+  const positionStr = lookup('Logo Position') || '';
+  const positions = positionStr
+    ? positionStr.split(',').map((s) => s.trim()).filter(Boolean).length
+    : 0;
+
+  return { type, positions: positions || (type ? 1 : 0) };
+}
+
+/**
  * Calculates volume pricing for a given cart object strictly PER PRODUCT ID
  * 
  * Cart format expected:
@@ -119,11 +110,12 @@ function getDiscountPercentage(totalQty, tiers = DEFAULT_TIERS) {
  *   ]
  * }
  */
-function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
+function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS, decoTiers = DECORATION_TIERS) {
   if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
     return {
       applied: false,
       totalDiscountAmount: 0,
+      totalDecorationCost: 0,
       discounts: [],
       items: []
     };
@@ -155,8 +147,9 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
     });
   }
 
-  // 2. Evaluate each product group against tiers & vendor exclusions
+  // 2. Evaluate each product group against tiers, vendor exclusions & decoration
   let totalDiscountAmount = 0;
+  let totalDecorationCost = 0;
   const appliedDiscounts = [];
   const processedItems = [];
 
@@ -175,20 +168,25 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
     let groupDiscountTotal = 0;
 
     for (const item of group.items) {
-      const { printCount, embroideryCount } = parseDecorationCounts(item.properties);
-      const printUnitPrice = getDecorationUnitPrice('print', group.totalQuantity);
-      const embroideryUnitPrice = getDecorationUnitPrice('embroidery', group.totalQuantity);
-      const decorationFeePerUnit = (printCount * printUnitPrice) + (embroideryCount * embroideryUnitPrice);
-
       const lineOriginalTotal = item.unitPrice * item.quantity;
       const lineDiscountAmount = (lineOriginalTotal * (discountPercentage / 100));
       const lineDiscountedTotal = lineOriginalTotal - lineDiscountAmount;
-      const baseDiscountedUnitPrice = item.quantity > 0 ? (lineDiscountedTotal / item.quantity) : item.unitPrice;
-
-      const finalUnitPrice = parseFloat((baseDiscountedUnitPrice + decorationFeePerUnit).toFixed(2));
-      const finalLineTotal = parseFloat((finalUnitPrice * item.quantity).toFixed(2));
+      const discountedUnitPrice = item.quantity > 0 ? (lineDiscountedTotal / item.quantity) : item.unitPrice;
 
       groupDiscountTotal += lineDiscountAmount;
+
+      // ── Decoration pricing ──────────────────────────────────────────────
+      const decoInfo = extractDecorationInfo(item.properties);
+      const decoCostPerUnitPerPos = getDecorationCostPerUnit(
+        decoInfo.type, group.totalQuantity, decoTiers
+      );
+      const decoCostPerUnit  = decoCostPerUnitPerPos * decoInfo.positions;
+      const decoLineTotal    = decoCostPerUnit * item.quantity;
+      totalDecorationCost   += decoLineTotal;
+
+      // Final unit price = discounted garment + decoration surcharge
+      const finalUnitPrice = discountedUnitPrice + decoCostPerUnit;
+      const finalLineTotal = lineDiscountedTotal + decoLineTotal;
 
       processedItems.push({
         id: item.id,
@@ -196,19 +194,20 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
         vendor: group.vendor,
         quantity: item.quantity,
         originalUnitPrice: item.unitPrice,
-        discountedUnitPrice: finalUnitPrice,
-        baseDiscountedUnitPrice: parseFloat(baseDiscountedUnitPrice.toFixed(2)),
-        decorationFeePerUnit: parseFloat(decorationFeePerUnit.toFixed(2)),
-        printCount,
-        embroideryCount,
-        printUnitPrice,
-        embroideryUnitPrice,
+        discountedUnitPrice: parseFloat(discountedUnitPrice.toFixed(2)),
         originalLineTotal: parseFloat(lineOriginalTotal.toFixed(2)),
         lineDiscountAmount: parseFloat(lineDiscountAmount.toFixed(2)),
-        discountedLineTotal: finalLineTotal,
+        discountedLineTotal: parseFloat(lineDiscountedTotal.toFixed(2)),
         appliedPercentage: discountPercentage,
         isExcluded,
-        properties: item.properties
+        // Decoration fields
+        decorationType: decoInfo.type,
+        decorationPositions: decoInfo.positions,
+        decorationCostPerUnit: parseFloat(decoCostPerUnit.toFixed(2)),
+        decorationLineTotal: parseFloat(decoLineTotal.toFixed(2)),
+        // Combined totals (garment after discount + decoration)
+        finalUnitPrice: parseFloat(finalUnitPrice.toFixed(2)),
+        finalLineTotal: parseFloat(finalLineTotal.toFixed(2))
       });
     }
 
@@ -226,8 +225,9 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
   }
 
   return {
-    applied: appliedDiscounts.length > 0,
+    applied: appliedDiscounts.length > 0 || totalDecorationCost > 0,
     totalDiscountAmount: parseFloat(totalDiscountAmount.toFixed(2)),
+    totalDecorationCost: parseFloat(totalDecorationCost.toFixed(2)),
     discounts: appliedDiscounts,
     items: processedItems
   };
@@ -235,11 +235,9 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS) {
 
 module.exports = {
   DEFAULT_TIERS,
-  PRINT_TIERS,
-  EMBROIDERY_TIERS,
+  DECORATION_TIERS,
   EXCLUDED_VENDORS,
   getDiscountPercentage,
-  getDecorationUnitPrice,
-  parseDecorationCounts,
+  getDecorationCostPerUnit,
   calculateCartDiscounts
 };
