@@ -193,6 +193,8 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS, decoTiers = DECORAT
         productId: group.productId,
         vendor: group.vendor,
         quantity: item.quantity,
+        title: item.title || item.name || null,
+        properties: item.properties || null,
         originalUnitPrice: item.unitPrice,
         discountedUnitPrice: parseFloat(discountedUnitPrice.toFixed(2)),
         originalLineTotal: parseFloat(lineOriginalTotal.toFixed(2)),

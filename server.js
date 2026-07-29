@@ -444,7 +444,9 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
     const calculation = calculateCartDiscounts({ items }, customTiers);
     console.log(`[VolumePricing API] Calculation summary: Applied=${calculation.applied}, TotalDiscount=£${calculation.totalDiscountAmount}, DecorationCost=£${calculation.totalDecorationCost}`);
 
-    const draftLineItems = calculation.items.map((item) => {
+    const draftLineItems = [];
+
+    for (const item of calculation.items) {
       const lineItem = {
         quantity: item.quantity
       };
@@ -455,7 +457,7 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         lineItem.variant_id = Number(item.variant_id);
       } else {
         lineItem.title = item.title || item.name || `Product (${item.id})`;
-        lineItem.price = item.finalUnitPrice || item.discountedUnitPrice;
+        lineItem.price = item.discountedUnitPrice;
       }
 
       if (item.appliedPercentage > 0) {
@@ -466,14 +468,30 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
         };
       }
 
+      // Forward line item properties (artwork, decoration type, logo position etc.)
       if (item.properties) {
         lineItem.properties = Array.isArray(item.properties)
           ? item.properties
           : Object.entries(item.properties).map(([name, value]) => ({ name, value }));
       }
 
-      return lineItem;
-    });
+      draftLineItems.push(lineItem);
+
+      // Add decoration cost as a separate custom line item
+      if (item.decorationType && item.decorationCostPerUnit > 0) {
+        const decoLabel = item.decorationType === 'embroidery' ? 'Embroidery' : 'Print';
+        const posLabel = item.decorationPositions > 1
+          ? `${item.decorationPositions} positions`
+          : '1 position';
+
+        draftLineItems.push({
+          title: `${decoLabel} (${posLabel})`,
+          price: item.decorationCostPerUnit.toFixed(2),
+          quantity: item.quantity,
+          taxable: true
+        });
+      }
+    }
 
     if (!shop || !accessToken) {
       console.warn(`[VolumePricing API Warning] Missing shop domain or access token. Returning fallback calculation response.`);
