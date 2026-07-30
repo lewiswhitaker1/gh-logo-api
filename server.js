@@ -477,8 +477,24 @@ app.post(["/api/volume-pricing/create-checkout", "/api/create-checkout"], async 
 
       draftLineItems.push(lineItem);
 
-      // Add decoration cost as a separate custom line item
-      if (item.decorationType && item.decorationCostPerUnit > 0) {
+      // Add decoration costs as separate custom line items per technique
+      if (item.decoBreakdown && item.decoBreakdown.length > 0) {
+        for (const deco of item.decoBreakdown) {
+          if (deco.costPerUnit > 0) {
+            const decoLabel = deco.type === 'embroidery' ? 'Embroidery' : 'Print';
+            const posLabel = deco.positions > 1
+              ? `${deco.positions} positions`
+              : '1 position';
+
+            draftLineItems.push({
+              title: `${decoLabel} (${posLabel})`,
+              price: deco.costPerUnit.toFixed(2),
+              quantity: item.quantity,
+              taxable: true
+            });
+          }
+        }
+      } else if (item.decorationType && item.decorationCostPerUnit > 0) {
         const decoLabel = item.decorationType === 'embroidery' ? 'Embroidery' : 'Print';
         const posLabel = item.decorationPositions > 1
           ? `${item.decorationPositions} positions`

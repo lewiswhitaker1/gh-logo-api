@@ -64,7 +64,15 @@ function getDecorationCostPerUnit(type, totalQty, decoTiers = DECORATION_TIERS) 
  * or as a plain object.
  */
 function extractDecorationInfo(properties) {
-  if (!properties) return { type: null, positions: 0 };
+  const result = {
+    embroideryPositions: 0,
+    printPositions: 0,
+    decorations: []
+  };
+
+  if (!properties) {
+    return { ...result, type: null, positions: 0 };
+  }
 
   // Normalise: accept both array-of-objects and plain object
   let lookup;
@@ -76,27 +84,55 @@ function extractDecorationInfo(properties) {
   } else if (typeof properties === 'object') {
     lookup = (key) => properties[key] || null;
   } else {
-    return { type: null, positions: 0 };
+    return { ...result, type: null, positions: 0 };
   }
 
-  const rawType = (lookup('Decoration Type') || lookup('Decoration') || '').toLowerCase().trim();
-
-  // Determine normalised type
-  let type = null;
-  if (rawType.includes('embroider')) {
-    type = 'embroidery';
-  } else if (rawType.includes('print')) {
-    type = 'print';
-  }
-  // "None - Plain garments" or missing → null (no decoration cost)
-
-  // Count positions from "Logo Position" property (comma-separated list)
+  const rawType = (lookup('Decoration Type') || lookup('Decoration') || '').trim();
   const positionStr = lookup('Logo Position') || '';
-  const positions = positionStr
+  const totalPositions = positionStr
     ? positionStr.split(',').map((s) => s.trim()).filter(Boolean).length
     : 0;
 
-  return { type, positions: positions || (type ? 1 : 0) };
+  if (!rawType || rawType.toLowerCase().includes('none') || rawType.toLowerCase().includes('plain')) {
+    return { ...result, type: null, positions: 0 };
+  }
+
+  // Check if rawType has per-position specification like "Centre of Chest (Embroidery), Big Front (Print)"
+  if (rawType.includes('(') && rawType.includes(')')) {
+    const segments = rawType.split(',').map((s) => s.trim()).filter(Boolean);
+    for (const segment of segments) {
+      const lower = segment.toLowerCase();
+      if (lower.includes('embroider')) {
+        result.embroideryPositions += 1;
+      } else if (lower.includes('print')) {
+        result.printPositions += 1;
+      }
+    }
+  } else {
+    // Single global type for all positions
+    const lower = rawType.toLowerCase();
+    const posCount = totalPositions || 1;
+    if (lower.includes('embroider')) {
+      result.embroideryPositions = posCount;
+    } else if (lower.includes('print')) {
+      result.printPositions = posCount;
+    }
+  }
+
+  if (result.embroideryPositions > 0) {
+    result.decorations.push({ type: 'embroidery', positions: result.embroideryPositions });
+  }
+  if (result.printPositions > 0) {
+    result.decorations.push({ type: 'print', positions: result.printPositions });
+  }
+
+  // Backward-compatible properties
+  result.type = result.decorations.length === 1
+    ? result.decorations[0].type
+    : (result.decorations.length > 1 ? 'mixed' : null);
+  result.positions = result.embroideryPositions + result.printPositions;
+
+  return result;
 }
 
 /**
@@ -177,12 +213,25 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS, decoTiers = DECORAT
 
       // ── Decoration pricing ──────────────────────────────────────────────
       const decoInfo = extractDecorationInfo(item.properties);
-      const decoCostPerUnitPerPos = getDecorationCostPerUnit(
-        decoInfo.type, group.totalQuantity, decoTiers
-      );
-      const decoCostPerUnit  = decoCostPerUnitPerPos * decoInfo.positions;
-      const decoLineTotal    = decoCostPerUnit * item.quantity;
-      totalDecorationCost   += decoLineTotal;
+      let decoCostPerUnit = 0;
+      const decoBreakdown = [];
+
+      for (const deco of decoInfo.decorations) {
+        const costPerPos = getDecorationCostPerUnit(deco.type, group.totalQuantity, decoTiers);
+        const costPerUnitForType = costPerPos * deco.positions;
+        decoCostPerUnit += costPerUnitForType;
+
+        decoBreakdown.push({
+          type: deco.type,
+          positions: deco.positions,
+          costPerPos,
+          costPerUnit: costPerUnitForType,
+          lineTotal: parseFloat((costPerUnitForType * item.quantity).toFixed(2))
+        });
+      }
+
+      const decoLineTotal = decoCostPerUnit * item.quantity;
+      totalDecorationCost += decoLineTotal;
 
       // Final unit price = discounted garment + decoration surcharge
       const finalUnitPrice = discountedUnitPrice + decoCostPerUnit;
@@ -205,6 +254,9 @@ function calculateCartDiscounts(cart, tiers = DEFAULT_TIERS, decoTiers = DECORAT
         // Decoration fields
         decorationType: decoInfo.type,
         decorationPositions: decoInfo.positions,
+        embroideryPositions: decoInfo.embroideryPositions,
+        printPositions: decoInfo.printPositions,
+        decoBreakdown,
         decorationCostPerUnit: parseFloat(decoCostPerUnit.toFixed(2)),
         decorationLineTotal: parseFloat(decoLineTotal.toFixed(2)),
         // Combined totals (garment after discount + decoration)
@@ -241,5 +293,6 @@ module.exports = {
   EXCLUDED_VENDORS,
   getDiscountPercentage,
   getDecorationCostPerUnit,
+  extractDecorationInfo,
   calculateCartDiscounts
 };
